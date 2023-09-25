@@ -1,4 +1,6 @@
 import ldap3
+import time 
+import logging
 # TODO: what should I do about the memberOf? should it just be the output of cnn.entries[0].memberOf from the members loop?
 # TODO: join together the search base into one path and pass it to write_to_file
 file_path = "output.ldif"
@@ -71,18 +73,47 @@ def get_email_list_from_ldap(group_name):
             for member in members:    
                 result = conn.search(search_base, f"(uid={member})", search_scope, attributes=attributes)
                 if not result:
-                    raise KeyError(f"Error: Could not find member with uid {member}")
+                    # if a member is not found, then just move onto the next member
+                    logger.warning(f"Could not find member with uid {member}")
+                    #raise KeyError(f"Error: Could not find member with uid {member}")
                 else:
-                    #print(conn.entries[0])
-                    # print((conn.entries[0].memberOf))
-                    # print(type(conn.entries[0].uid))
-                    # print("-------------------------------")
-                    #uid, mail
                     uid = conn.entries[0].uid
-                    mail = conn.entries[0].mail
-                    memberOf = conn.entries[0].memberOf
+                    try:
+                        mail = conn.entries[0].mail
+                    except:
+                        # If a primary email isn't set, then there's no point in adding the user entry to the LDIF
+                        continue
+                    try:
+                        memberOf = conn.entries[0].memberOf
+                    except:
+                        memberOf = []
+
                     write_to_file(uid, mail, memberOf, domain)
-        
-with open(file_path, 'w') as file:
-    pass  # This block is empty, and the file is closed automatically
-mail_list = get_email_list_from_ldap('org_ici')
+
+def main():
+    start_time = time.time()
+    with open(file_path, 'w') as file:
+        pass  # This block is empty, and the file is closed automatically
+    mail_list = get_email_list_from_ldap('all_ncsa_employe') # org_ici
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    # Print the elapsed time in seconds
+    print(f"Elapsed time: {elapsed_time:.2f} seconds")
+
+
+
+if __name__ == '__main__':
+    formater = logging.Formatter('%(name)s:%(asctime)s:%(filename)s:%(levelname)s:%(message)s')
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+
+    fileHandler = logging.FileHandler("error.txt", "a")
+    fileHandler.setLevel(logging.WARNING)
+    fileHandler.setFormatter(formater)
+
+    logger.addHandler(fileHandler)
+
+    main()
+
+
+
