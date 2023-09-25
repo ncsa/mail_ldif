@@ -2,7 +2,7 @@ import ldap3
 # TODO: what should I do about the memberOf? should it just be the output of cnn.entries[0].memberOf from the members loop?
 # TODO: join together the search base into one path and pass it to write_to_file
 file_path = "output.ldif"
-def write_to_file(uid, mail, domain):
+def write_to_file(uid, mail, memberOf, domain):
 
     # dn, uid, mail, mailRoutingAddress, profileType
 
@@ -13,7 +13,8 @@ def write_to_file(uid, mail, domain):
             file.write(f"mail: {mail}\n")
             file.write(f"mailRoutingAddress: {uid}@{domain}\n")
             file.write(f"profileType: 0\n")
-            #file.write(f"memberOf: \n")
+            for group in memberOf:
+                file.write(f"memberOf: {group}\n")
             file.write("\n")
     except FileNotFoundError:
         print(f"The file '{file_path}' was not found.")
@@ -66,18 +67,21 @@ def get_email_list_from_ldap(group_name):
                     raise KeyError(f"Error: Could not find group {group_name}")
                 else:
                     members = [ m.split(',')[0].split('=')[1] for m in conn.entries[0].uniqueMember ]
-                
-            # print(members)
-            emails = []
+            
             for member in members:    
                 result = conn.search(search_base, f"(uid={member})", search_scope, attributes=attributes)
                 if not result:
                     raise KeyError(f"Error: Could not find member with uid {member}")
                 else:
+                    #print(conn.entries[0])
+                    # print((conn.entries[0].memberOf))
+                    # print(type(conn.entries[0].uid))
+                    # print("-------------------------------")
                     #uid, mail
                     uid = conn.entries[0].uid
                     mail = conn.entries[0].mail
-                    write_to_file(uid, mail, domain)
+                    memberOf = conn.entries[0].memberOf
+                    write_to_file(uid, mail, memberOf, domain)
         
 with open(file_path, 'w') as file:
     pass  # This block is empty, and the file is closed automatically
