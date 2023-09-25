@@ -1,6 +1,6 @@
 # mail_ldif
 
-Generate an LDIF file containing 6key-value pairs per user entry: 
+Generate an LDIF file containing user entries 
 ```
 dn: jDoe1@illinois.edu                 
 uid: jDoe1@illinois.edu  
