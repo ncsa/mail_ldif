@@ -3,6 +3,8 @@ from dataclasses import dataclass
 import sys
 import logging
 import re
+import dns.resolver
+import time
 
 @dataclass 
 class Entry:
@@ -142,28 +144,60 @@ def remove_invalid_emails(entries):
     """
     tmp_entries = dict(entries)
     for key, entry in tmp_entries.items():
+        
         invalid = False
-        combined = [entry.source] + entry.targets
-        for target in combined:
-            if not valid_email(target):
+        
+        if not valid_email(entry.source, 0) or not has_mx_record(entry.source):
+            print(f"INVALID: {key}")
+            invalid_email_entries.append(entry)
+            entries.pop(key)
+            continue
+        
+        for target in  entry.targets:    
+            if not valid_email(target, 1) or not has_mx_record(entry.source):
                 invalid = True
                 break    
         if invalid:
+            print(f"INVALID: {key}")
             invalid_email_entries.append(entry)
             entries.pop(key)
+        else:
+            print(f"VALID: {key}")
 
-def valid_email(address):
+def valid_email(address, type):
     """
     Checks whether the address is valid with the regex
     
     Args:
         address (str): The email address 
+        type (int): source (0) or target (1)
         
     Returns:
         bool: whether or not address is valid
     """
-    regex = r'\b[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
+    if type == 0:
+        regex = r'\b[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
+    else:
+        regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
+        
     return True if re.fullmatch(regex, address) else False
+
+def has_mx_record(address):
+    domain = address.split('@')[1]
+    try:
+        # Perform a DNS query for MX records
+        dns.resolver.resolve(domain, 'MX')
+        return True
+    except dns.resolver.NoAnswer:
+        return False
+    except dns.resolver.NXDOMAIN:
+        return False
+    except dns.resolver.Timeout:
+        return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
+
         
 def parse_input_file(filename, entries):
     """
@@ -305,6 +339,7 @@ def process_args():
     return parser.parse_args()
 
 def main():
+    start_time = time.time()
     args = process_args()
     if args.input == None:
         logger.error("Provide input file(s). Run python3 generate.py -h for help")
@@ -342,6 +377,10 @@ def main():
     with open("unparseable.txt", 'w') as f:
         for line in unparseable_entries:
             f.write(f"{line}")
+            
+    end_time = time.time()
+    time_dif = end_time - start_time
+    print(f"Execution time: {time_dif}")
 
     
 if __name__ == '__main__':
