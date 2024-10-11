@@ -5,6 +5,10 @@ import logging
 import re
 import dns.resolver
 import time
+import yaml
+from datetime import datetime
+import csv
+import collections
 
 @dataclass 
 class Entry:
@@ -12,55 +16,47 @@ class Entry:
    targets: list[str]
    filename: str
 
-def resolve_symlinks_helper(entries, entry, visited):
+def parse_file(filename: str) -> tuple[list[Entry], list[Entry]]:
     """
-    Recursive function that resolves dependencies 
+    Parses filename for sources and targets. Expect 1 source and a comma 
+    seperated list for targerts (if more than one target)
     
     Args:
-        entries (dict): A dictionary of str to Entry pairs
-        entry (Entry): The current entry the recursive function is on 
-        visited (str): A set of nodes that have been visited
-        
-    Returns:
-        new_targets (str): A list of endpoints (leaf nodes) from source entry
-    """
-    if entry.source in visited:
-        return None
+        filename (str): name of file to be parsed
     
-    visited.add(entry.source)
-    new_targets = []
-    for link in entry.targets:
-        if link not in entries:
-            new_targets.append(link)
-            continue
+    Returns:
+    tuple[list[Entry], list[Entry]]: A tuple containing two lists of `Entry` 
+    objects. The first list includes `Entry` objects that meet the expected 
+    line format, while the second list contains those that do not.
+    """
+    valid_entries = []
+    invalid_entries = []
+
+    with open(filename, 'r') as f:
+        for line_number, line in enumerate(f, start=1):
+            line = line.strip()
+            components = line.split(' ')
             
-        res = resolve_symlinks_helper(entries, entries[link], visited)
-        if res:
-            new_targets.extend(res)
-    return new_targets
+            if len(components) != 2:
+                invalid_entries.append(line)
+                continue
 
-def resolve_symlinks(entries):
-    """ 
-    Resolve the dependecies for each entry. Assign a source node with a list of endpoints (leaf nodes)
-    that source resolves to. Modify entries in place. 
-    
-    Args:
-        entries (dict): A dictionary of str to Entry pairs
-    
-    Returns:
-        None
-    """
-    for key, entry in entries.items():
-        visited = set()
-        entry.target = resolve_symlinks_helper(entries, entry, visited)    
+            source = components[0]
+            targets = components[1].split(',')
+            targets.sort()
+            valid_entries.append(Entry(source, targets, filename))
 
-def assign_new_address(address, address_mapping):
+    return (valid_entries, invalid_entries)
+
+def assign_domain(address: str, domain_mapping: dict[str, str]) -> str: 
     """
-    Assigns a new domain to an email address if the domain exist in address_mapping
+    Assigns a new domain to an email address if the domain exist in 
+    domain_mapping
     
     Args:
         address (str): an email address
-        address_mapping (str to str dict): A dictionary that is used to replace specified domains
+        domain_mapping (dict[str, str]): A dictionary that is used to replace 
+        specified domains
     
     Returns:
         (str) An email address with the desired domain
@@ -68,122 +64,198 @@ def assign_new_address(address, address_mapping):
     address_components = address.split('@')
     
     if len(address_components) == 1:    
-        return f"{address}@{address_mapping["default"]}"
+        return f"{address}@{domain_mapping["default"]}"
     
     domain = address_components[1]
-    if domain in address_mapping:
-        return f"{address_components[0]}@{address_mapping[domain]}"
+
+    new_domain = domain_mapping.get(domain, None)
+
+    if domain in domain_mapping:
+        return f"{address_components[0]}@{domain_mapping[domain]}" 
     return address
 
-def is_special_address(address, special_addresses):
+def check_and_replace_domain(entries: list[Entry], 
+                             domain_mapping: list[str, str]) \
+                             -> list[Entry]:
+    """
+    Reassigns the addresses contain in each 'Entry' object from entries 
+    if their domain exist in domain_mapping
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects 
+        domain_mapping (dict[str, str]): A dictionary that is used to replace 
+        specified domains
+
+    Returns:
+        list[Entry]:A list of 'Entry' objects with their addresses modified
+    """
+    if not domain_mapping:
+        return entries
+
+    for entry in entries:
+        entry.source = assign_domain(entry.source, domain_mapping)
+
+        for i, address in enumerate(entry.targets):
+            entry.targets[i] = assign_domain(address, domain_mapping)
+    return entries
+
+def find_exact_match(entries: list[Entry]) -> list[Entry]:
+    """
+    Traverses through entries and find unique 'Entry' objects, where sources 
+    are the same, but targets are not
+
+    Args:
+        entries (list[Entry]): A list of entries where their sources are the 
+        same 
+
+    Returns:
+        list['Entry']: A list of unique 'Entry' objects with the same source,
+        but different targets
+    """
+    entries.sort(key=lambda v: v.source)
+    unique_targets_entries = [entries[0]]
+    
+    for entry in entries[1:]:
+        if entry.targets != unique_targets_entries[-1].targets:
+            unique_targets_entries.append(entry)
+    return unique_targets_entries
+
+def remove_duplicates(entries: list[Entry]) \
+                      -> tuple[list[Entry], list[Entry]]:
+    """
+    Finds unique 'Entry' objects
+
+    Note: In case that there are duplicates with same source and different 
+    targets, and user wants combine the targets together. Add these entries 
+    to entries_to_remove, and add the desired entry to additional_entries.  
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects 
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects that are 
+        unique, while the second list contains those are not. 
+
+    """
+    valid_entries = []
+    invalid_entries = []
+
+    entries.sort(key=lambda v: v.source)
+
+    # 2 pointer approach
+
+    l = 0
+
+    for r, entry in enumerate(entries):
+        if entries[l].source == entry.source:
+            continue
+
+        if r - l > 1:
+            unique_duplicates = find_exact_match(entries[l:r])
+            if len(unique_duplicates) == 1:
+                valid_entries.append(unique_duplicates[0])
+            else:
+                invalid_entries.extend(unique_duplicates)
+        else:
+            valid_entries.append(entries[l])
+        l = r 
+
+    if l == r: 
+        valid_entries.append(entry)
+    else:
+        unique_duplicates = find_exact_match(entries[l:r + 1])
+        if len(unique_duplicates) == 1:
+            valid_entries.append(unique_duplicates[0])
+        else:
+            invalid_entries.extend(unique_duplicates)
+
+    return (valid_entries, invalid_entries)
+
+def remove_non_ncsa_source_domains(entries: list[Entry]) \
+                                   -> tuple[list[Entry], list[Entry]]:
+    """
+    Removes entries with non@ncsa domain sources.
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with sources 
+        that doesn't have a ncsa domain, while the second list contains 
+        those that do. 
+    """
+    valid_entries = []
+    invalid_entries = []
+
+    for entry in entries:
+        if "@ncsa" not in entry.source:
+            invalid_entries.append(entry)
+        else:
+            valid_entries.append(entry)
+    return (valid_entries, invalid_entries)
+
+def is_special_address(address: str, special_addresses: set[str]) -> bool:
     """
     Checks whether the address is one of the special addresses
-    
+
     Args:
         address (str): The email address 
-        special_addresses (set of str): A set containg special addresssses
+        special_addresses (set[str]): contains keywords that 
+        should be filtered out
     
     Returns:
-        bool: whether the address is a special address or nots
+        bool: whether the address is a special address or not
     """
     for special_address in special_addresses:
         if special_address in address:
             return True
     return False
 
-def remove_special_addresses(entries, special_addresses):
+def remove_special_addresses(entries: list[Entry],
+                             special_addresses: set[str]) \
+                             -> tuple[list[Entry], list[Entry]]:
     """
-    Removes entries with special addresses (specified by user) from entries. 
-    Modify entries in place
+    Removes entries with special addresses from entry's targets. 
     
     Args:
         entries (dict): A dictionary of str to Entry pairs
-        special_addresses (set of str): A set containg special addresssses
-    
+        special_addresses (set[str] ): contains keywords that should be 
+        filtered out
+   
     Returns:
-        None
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with 
+        non-special addresses, while the second list contains those that do. 
     """
-    tmp_entries = dict(entries)
-    for key, entry in tmp_entries.items():
+    if not special_addresses:
+        return (entries, None)
+
+    valid_entries = []
+    invalid_entries = []
+
+    for entry in entries:
         found_special_address = False
         for address in entry.targets:
             if is_special_address(address, special_addresses):
-                found_special_address = True
+                found_special_address = True 
                 break
         if found_special_address:
-            special_address_entries.append(entry)
-            entries.pop(key)
-
-def remove_non_ncsa_addresses(entries):
-    """
-    Removes entries with non@ncsa domain sources.
-    Modify in place
-    Args:
-        entries (dict): A dictionary of str to Entry pairs
-        
-    Returns:
-        None
-    """
-    tmp_entries = dict(entries)
-    for key, entry in tmp_entries.items():
-        if "@ncsa" not in entry.source:
-            non_ncsa_domain_entries.append(entry)
-            entries.pop(key)
-
-def remove_invalid_emails(entries):
-    """
-    Checks whether the emails (source and targets) are valid emails. If not, it will 
-    be removed from entries
-    Modify entries in place
-    
-    Args:
-        entries (dict): A dictionary of str to Entry pairs
-        
-    Returns:
-        None
-    """
-    tmp_entries = dict(entries)
-    for key, entry in tmp_entries.items():
-        
-        invalid = False
-        
-        if not valid_email(entry.source, 0) or not has_mx_record(entry.source):
-            print(f"INVALID: {key}")
-            invalid_email_entries.append(entry)
-            entries.pop(key)
-            continue
-        
-        for target in  entry.targets:    
-            if not valid_email(target, 1) or not has_mx_record(entry.source):
-                invalid = True
-                break    
-        if invalid:
-            print(f"INVALID: {key}")
-            invalid_email_entries.append(entry)
-            entries.pop(key)
+            invalid_entries.append(entry)
         else:
-            print(f"VALID: {key}")
+            valid_entries.append(entry)
+    return (valid_entries, invalid_entries)
 
-def valid_email(address, type):
+def has_mx_record(domain: str) -> bool:
     """
-    Checks whether the address is valid with the regex
-    
+    Checks whether there is a valid MX record for domain
+
     Args:
-        address (str): The email address 
-        type (int): source (0) or target (1)
-        
+        domain (str): a domain
+    
     Returns:
-        bool: whether or not address is valid
+        bool: Whether a valid MX record for domain
     """
-    if type == 0:
-        regex = r'\b[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
-    else:
-        regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
-        
-    return True if re.fullmatch(regex, address) else False
-
-def has_mx_record(address):
-    domain = address.split('@')[1]
     try:
         # Perform a DNS query for MX records
         dns.resolver.resolve(domain, 'MX')
@@ -198,134 +270,493 @@ def has_mx_record(address):
         print(f"An error occurred: {e}")
         return False
 
-        
-def parse_input_file(filename, entries):
+def valid_email_format(address: str, index: int) -> bool:
     """
-    Parses the input file of key value pairs
+    Checks whether the address is syntactically correct
     
     Args:
-        filename (str): the input file
+        address (str): The email address 
+        index (int): source (0) or target (1)
         
     Returns:
-        dict: contains the source as the key and list of targets as value
+        bool: Whether or not address is syntactically correct
     """
+    if index == 0:
+        regex = r'\b[A-Za-z0-9._%-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
+    else:
+        regex = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,7}\b'
+        
+    return True if re.fullmatch(regex, address) else False
+
+def remove_misformatted_addresses(entries: list[Entry]) \
+                                  -> tuple[list[Entry], list[Entry]]:
+    """
+    Removes 'Entry' objects that are not syntactically correct
+
+    Args: 
+        entries (list[Entry]): A list of 'Entry' objects
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with 
+        addresses that are syntactically correct, while the second list 
+        contains those that are not  
+    """
+    valid_entries = []
+    invalid_entries = []
+
+    for entry in entries:
+        combination = [entry.source] + entry.targets
+        found_misformatted_address = False
+        for index, address in enumerate(combination):
+            if not valid_email_format(address, index):
+                invalid_entries.append(entry)
+                found_misformatted_address = True
+                break   
+        if not found_misformatted_address:
+            valid_entries.append(entry)
+    return (valid_entries, invalid_entries)
+
+def get_valid_domain(domain: str) -> list[str]:
+    """ 
+    Check and obtain a domain with a valid MX record. Checks whether the 
+    given domain has a valid record and attempts domain devolution if not.
+
+    Args:
+      domain (str): The domain of an email address
+
+    Returns:
+      list[str]: A list of domains containing a history of the devolution
+      of the given domain. If a valid domain exist, the last value is 
+      a str. Otherwise, it is None. 
+    """
+    #print(domain)
+    if has_mx_record(domain):
+        return [domain]
     
-    tmp_entries = dict(entries)
+    components = domain.split('.')
     
-    with open(filename, 'r') as f:
-        for line_number, line in enumerate(f, start=1):
-            newLine = line.strip()
-            newLine = newLine.replace('\t', ' ')
+    if len(components) == 2:
+        return [None]
+    
+    new_domain = '.'.join(components[1:])
+    res = [domain]
+    res.extend(get_valid_domain(new_domain))
+    return res 
+
+def remove_invalid_addresses(entries: list[Entry]) \
+                             -> tuple[list[Entry], list[Entry]]:
+    """
+    Checks whether the emails (source and targets) have MX records 
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+        
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with 
+        addresses that have MX records, while the second list 
+        contains those that do not 
+    """
+
+    known_domains = dict()
+    valid_entries = []
+    invalid_entries = []
+
+    for entry in entries:
+        combination = [entry.source] + entry.targets
+        new_addresses = []
+        for index, address in enumerate(combination):
+
+            address_components = address.split('@')
+            username = address_components[0]
+            domain = address_components[1]
+
+            if domain in known_domains:
+                if not known_domains[domain]:
+                    invalid_entries.append(entry)
+                    break
+                else:
+                    new_addresses.append(f"{username}@{known_domains[domain]}")
+                    continue
+
+            res = get_valid_domain(domain)
+            for invalid_domain in res:
+                # res[len(res) - 1] could be None or a str (for valid domain)
+                known_domains[invalid_domain] = res[-1]
             
-            colon_index = newLine.find(':')
-            space_index = newLine.find(' ')
-            
-            if colon_index == -1:
-                entry = newLine.split(' ')
-            elif space_index == -1 or colon_index < space_index:
-                entry = newLine.split(':')
+            if res[-1]:
+                new_address = f"{username}@{res[-1]}"
+                new_addresses.append(new_address)
             else:
-                # colon_index >= space_index:
-                entry = newLine.split(' ')
+                invalid_entries.append(entry)
+                break
 
-            targets = []
-            
-            tmp_entry = []
-            
-            for v in entry:
-                if len(v) != 0:
-                    tmp_entry.append(v)
-            entry = tmp_entry
-            
-            if len(entry) != 2:
-                # print(f"Messed Up: {entry}")
-                unparseable_entries.append(line)
-                continue
-                
-            for target in entry[1].split(','):
-                target_address = assign_new_address(target.strip(), address_mapping)
-                targets.append(target_address)
-            
-            targets.sort()
-            source = assign_new_address(entry[0].strip() , address_mapping)
-            entry = Entry(source, targets, filename)
-               
-            if source in tmp_entries and targets == tmp_entries[source].targets:
-                continue
-                    
-            if source in tmp_entries:
-                duplicate_entries.append(entry)
-                if tmp_entries[source] not in duplicate_entries:
-                    duplicate_entries.append(tmp_entries[source])
-                continue
-            
-            # By this step, entry should be standardized
-            tmp_entries[source] = entry 
-    return tmp_entries    
+        if len(new_addresses) == len(combination): 
+            # All domains are accounted for 
+            entry.source = new_addresses[0]
+            entry.targets = new_addresses[1:]
+            valid_entries.append(entry)
 
-def write_to_file(filename, entries):
+    return (valid_entries, invalid_entries)
+
+def resolve_symlinks_helper(source_to_targets: dict[str, list[str]],
+                            address: str,
+                            visited: set[str]) \
+                            -> list[str]:
     """
-    Writes the entries into an LDIF file
+    Recursive function that resolves dependencies 
     
     Args:
-        filename (str): the output file
+        entries (dict): A dictionary of str to Entry pairs
+        entry (Entry): The current entry the recursive function is on 
+        visited (str): A set of nodes that have been visited
         
     Returns:
+        new_targets (lst[str]): A list of endpoints (leaf nodes) 
+        from source entry
+    """
+    new_targets = []
+    for neighbor in source_to_targets[address]:
+        if neighbor not in source_to_targets:
+            new_targets.append(neighbor)
+            continue
+        if neighbor in visited:
+            continue
+
+        visited.add(neighbor)    
+        res = resolve_symlinks_helper(source_to_targets, neighbor, visited)
+
+        if res:
+            new_targets.extend(res)
+    return new_targets
+
+
+def resolve_symlinks(entries: list[Entry]) -> list[Entry]:
+    """ 
+    Resolve the dependecies for each 'Entry' object's targets. 
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+    
+    Returns:
+        list[Entry]: a list of 'Entry' objects with their targets resolved
+        to an end distination
+    """
+
+    # Create an adjency list
+
+    source_to_targets = dict()
+
+    for entry in entries:
+        source_to_targets[entry.source] = entry.targets
+      
+    for entry in entries:
+        visited = set()
+        visited.add(entry.source)
+        res = resolve_symlinks_helper(source_to_targets, 
+                                      entry.source, 
+                                      visited)
+        if res:
+            entry.targets = res
+
+    return entries
+
+def print_list_entries(entries: list[Entry], filename: str) -> None:
+    """
+    Write to filename the 'Entry' objects from entries
+
+    Args:
+        entries (List[Entry]): A list of 'Entry' objects 
+        filename (str): Name of the file to write to 
+    
+    Return:
         None
     """
-    with open(filename, 'w') as f:
-        for key in entries:
-            entry = entries[key]
-            f.write(f"dn: {entry.source}\n")
-            f.write(f"uid: {entry.source}\n")
-            f.write(f"mail: {entry.source}\n")
-            
-            target_key = 'mailRoutingAddress'
-            if len(entry.targets) == 1:
-                f.write(f"profileType: 0\n")
-            else:
-                f.write(f"profileType: 1\n")
-                target_key = 'listMember'
-                            
-            for target in entry.targets:
-                f.write(f"{target_key}: {target}\n")
-            f.write("\n")
-            
-def dump(entries):
-    """
-    Dumps the entries to the console. One line per entry. 
-    """
-    for key, entry in entries.items():
-        print(f"dn: {entry.source}", end=',')
-        print(f"uid: {entry.source}", end=',')
+    if not entries:
+        return None
 
-        target_key = 'mailRoutingAddress'
-        if len(entry.target) == 1:
-            print(f"profileType: 0", end=',')
+    with open(filename, 'w') as f:
+        for entry in entries:
+            f.write(f"{entry.source} {",".join(entry.targets)}\n")
+
+def remove_source_matching_regex(entries: list[Entry], regexes: list[str]) \
+                                 -> tuple[list[Entry], list[Entry]]:
+    """
+    Filter out any 'Entry' object's source that matches the regex
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+        regexes (list[str]): A list of regexes 
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with 
+        sources that doesn't match the regexes, while the second list 
+        contains those that do
+
+    """
+    if not regexes:
+        return (entries, None)
+    # 0 for source, 1 for tagets
+
+    valid_entries = []
+    invalid_entries = []
+    
+    compiled_regexes = [re.compile(rf"{regex}") for regex in regexes]
+
+    for entry in entries:
+        matched = False
+        if any(regex.search(entry.source) for regex in compiled_regexes):
+            invalid_entries.append(entry)
+            matched = True
+        if not matched:
+            valid_entries.append(entry)            
+    return (valid_entries, invalid_entries)
+
+def remove_target_matching_regex(entries: list[Entry], regexes: list[str]) \
+                                 -> tuple[list[Entry], list[Entry]]:
+    """
+    Filter out any 'Entry' object's targets that matches the regex
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+        regexes (list[str]): A list of regexes 
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects with 
+        targets that doesn't match the regexes, while the second list 
+        contains those that do
+
+    """
+    if not regexes:
+        return (entries, None)
+
+    valid_entries = []
+    invalid_entries = []
+    
+    compiled_regexes = [re.compile(rf"{regex}") for regex in regexes]
+    for entry in entries:
+        for address in entry.targets:
+            matched = False
+            if any(regex.search(address) for regex in compiled_regexes):
+                invalid_entries.append(entry)
+                matched = True
+                break
+        if not matched:
+            valid_entries.append(entry)
+    return (valid_entries, invalid_entries)
+
+def remove_known_bad_entries(entries: list[Entry],
+                             entries_to_remove: dict[str, list[str]]) \
+                             -> tuple[list[Entry], list[Entry]]:
+    """
+    Filter out any 'Entry' objects that exist in entries_to_remove. 
+    Uses set arithmetic. ONLY the targets listed in entries_to_remove are
+    removed.
+    Example:
+    Entry(a, [b,c], 'somefile])
+    entries_to_remove = {a: [b]}
+    The res is: Entry(a, [c]) 
+
+    IF entries_to_remove = {a: [b,c]}, then the entire Entry is removed. 
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+        entries_to_remove (dict[str, list[str]): A dictionary that has 
+        source as the key and a list of targets as value. 
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects that aren't
+        listed in entries_to_remove, while the second list  contains 
+        those that do
+    """
+    if not entries_to_remove:
+        return entries
+
+    valid_entries = []
+
+    for entry in entries:
+        if entry.source in entries_to_remove:
+            a = set(entries_to_remove[entry.source])
+            b = set(entry.targets)
+            diff = b - a
+            if diff:
+                entry.targets = list(diff)
+                entry.targets.sort()
+                valid_entries.append(entry)
         else:
-            print(f"profileType: 1", end=',')
-            target_key = 'listMember'
-            
-        target_string = ''
-        for target in entry.targets:
-            target_string += f"{target_key}: {target},"
-        
-        print(target_string[:len(target_string) - 1])
+            valid_entries.append(entry)
+    
+    return valid_entries
 
-def write_errors_to_file(filename, error_entries):
+def modify_misformatted_addresses(entries: list[Entry], 
+                                  misformatted_addresses: dict[str, str]) \
+                                  -> list[Entry]:
     """
-    Writes out the various errors found in the input files 
-    
+    Modify the addresses in the 'Entry' object if they exist in 
+    misformatted_addresses 
+
     Args:
-        filename: The filename of the particular error is written to
-        error_entries (list of Entry)
-    
+        entries (list[Entry]): A list of 'Entry' objects
+        misformatted_addresses (dict[str, str): A dictionary that has 
+        the misformatted address as the key and the correct address as the 
+        value
+
+    Returns:
+        list[Entry]: A list of 'Entry' objects with corrected addresses 
+    """
+    if not misformatted_addresses:
+        return entries
+
+    for entry in entries:
+        entry.source = misformatted_addresses.get(entry.source, entry.source)
+
+        tmp_targets = []
+        for target in entry.targets:
+            tmp_targets.append(misformatted_addresses.get(target, target))
+        entry.targets = tmp_targets
+
+    return entries
+
+def add_additional_entries(entries: list[Entry], 
+                           additional_entries: dict[str, list[str]]) \
+                           -> list[Entry]:
+    """
+    Add additional 'Entry' objects to entries. If an 'Entry' object with the
+    same source already exist, then the new targets will be appended to the 
+    existing targets in the original 'Entry' object. If not, a new 
+    'Entry' object will be created and appended to entries. 
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+        additional_entries (dict[str, str): A dictionary that has 
+        the source as the key and a list of targets as the 
+        value
+
+    Returns:
+        list[Entry]: A list of 'Entry' objects with additional entries. 
+    """
+    if not additional_entries:
+        return entries
+
+    # Create an adjency list
+    source_to_targets = dict()
+
+    for entry in entries:
+        source_to_targets[entry.source] = entry.targets
+
+    for source, targets in additional_entries.items():
+        if source in source_to_targets:
+            print(f"WARNING: appending {targets} to an existing entry:" + 
+                  f"{source} {source_to_targets[source]}")
+            source_to_targets[source].extend(targets)
+        else:
+            entries.append(Entry(source, targets, 'additional_entries'))
+    return entries
+
+def find_ncsa_domain_targets(entries: list[Entry]) \
+                             -> tuple[list[Entry], list[Entry]]:
+    """
+    Filter out any 'Entry' object that has "@ncsa.illinois.edu" in their
+    list of targets
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+
+    Returns:
+        tuple[list[Entry], list[Entry]]: A tuple containing two lists of 
+        `Entry` objects. The first list includes `Entry` objects that does not
+        contain "@ncsa.illinois.edu" in their targets, while the second list 
+        contains those that do 
+    """
+    valid_entries = []
+    invalid_entries = []
+
+    for entry in entries:
+        if any("@ncsa.illinois.edu" in target for target in entry.targets):
+            invalid_entries.append(entry)
+        else:
+            valid_entries.append(entry)
+    return (valid_entries, invalid_entries)
+
+def write_to_csv(filename: str, entries: list[Entry]) -> None: 
+    """
+    Write out the sources and targets from entries to filename in csv format
+
+    filename (str): The name of the file 
+    entries (list[Entry]): A list of 'Entry' objects 
+
     Returns:
         None
     """
-    with open(filename, 'w') as f:
-        for entry in error_entries:
-            f.write(f"{entry.filename}: {entry.source} => {entry.targets}\n")
+    with open(filename, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Source", "Targets"])
+        for entry in entries:
+            comma_seperated_targets = ",".join(entry.targets)
+            writer.writerow([f"{entry.source}", f"{comma_seperated_targets}"])
+
+def generate_output(input_file: list[str]) -> None:
+    """
+    Reads in the entries from the list of file in input_file and compile 
+    a csv file
+
+    Args:
+        input_file (list[str]): A list of input files 
+
+    Returns:
+        None
+    """
+    
+    # A list of Entry
+    entries = []
+    for file in input_file:
+        parseable, unparseable = parse_file(file)
+        entries.extend(parseable)
+
+    # Obtain values from the config.yaml
+    domain_mapping = data.get('domain_mapping', None)
+    misformatted_addresses = data.get('misformatted_addresses', None)
+    entries_to_remove = data.get('entries_to_remove', None)
+    source_regex = data.get('source_regex_to_remove', None)
+    target_regex = data.get('target_regex_to_remove', None)
+    additional_entries = data.get('additional_entries', None)
+    special_addresses = data.get('special_addresses', None)
+
+    # MODIFY AND REMOVE KNOWN BAD ENTRIES
+    entries = check_and_replace_domain(entries, domain_mapping)
+    entries = modify_misformatted_addresses(entries, misformatted_addresses)
+    entries = remove_known_bad_entries(entries, entries_to_remove)
+    entries, source_regexed_entries = remove_source_matching_regex(entries, source_regex)
+    entries, target_regexed_entries = remove_target_matching_regex(entries, target_regex)
+
+    # ADD ADDITIONAL ENTRIES
+    entries = add_additional_entries(entries, additional_entries)
+    
+    # FILTER ENTRIES
+    entries, duplicates = remove_duplicates(entries)
+    entries, non_ncsa = remove_non_ncsa_source_domains(entries)
+    entries, special_addresses = remove_special_addresses(entries, special_addresses)
+    entries, misformatted_addresses = remove_misformatted_addresses(entries)
+    entries, invalid_addresses = remove_invalid_addresses(entries)
+    entries = resolve_symlinks(entries)  
+    entries, ncsa_domain_targets = find_ncsa_domain_targets(entries)
+
+    # PRINT VALID AND INVALID ENTRIES TO FILES
+    subdir = './invalids'
+    print_list_entries(duplicates, f"{subdir}/duplicates.txt")
+    print_list_entries(non_ncsa, f"{subdir}/non_ncsa_domains.txt")
+    print_list_entries(special_addresses, f"{subdir}/special_addresses.txt")
+    print_list_entries(misformatted_addresses, f"{subdir}/misformatted_addresses.txt")
+    print_list_entries(invalid_addresses, f"{subdir}/invalid_addresses.txt")
+    print_list_entries(source_regexed_entries, f"{subdir}/source_regexed.txt")
+    print_list_entries(target_regexed_entries, f"{subdir}/target_regexed.txt")
+    print_list_entries(ncsa_domain_targets, f"{subdir}/ncsa_domain_targets.txt")
+    
+    write_to_csv('output.csv', entries)
 
 def process_args():
     parser = argparse.ArgumentParser(
@@ -339,7 +770,6 @@ def process_args():
     return parser.parse_args()
 
 def main():
-    start_time = time.time()
     args = process_args()
     if args.input == None:
         logger.error("Provide input file(s). Run python3 generate.py -h for help")
@@ -347,73 +777,16 @@ def main():
     if args.output == None and args.dump == False:
         logger.error("Provide an output option. Run python3 generate.py -h for help")
         sys.exit(1)
-    
-    entries = {}
-    for file in args.input:
-        entries = parse_input_file(file, entries)
-        
-    
-    for entry in duplicate_entries:
-        # If pop returns -1, that means that the entry has been removed once already
-        entries.pop(entry.source, -1) 
 
-    resolve_symlinks(entries)
-    remove_non_ncsa_addresses(entries)
-    remove_special_addresses(entries, special_addresses)
-    remove_invalid_emails(entries)
-    
-    
-    if args.output != None:
-        write_to_file(args.output, entries)        
-        
-    if args.dump:
-        dump(entries)
-    
-    write_errors_to_file("duplicates.txt", duplicate_entries)
-    write_errors_to_file("special_address.txt", special_address_entries)
-    write_errors_to_file("invalid_email.txt", invalid_email_entries)
-    write_errors_to_file("non_ncsa_domain_src.txt", non_ncsa_domain_entries)
-    
-    with open("unparseable.txt", 'w') as f:
-        for line in unparseable_entries:
-            f.write(f"{line}")
-            
-    end_time = time.time()
-    time_dif = end_time - start_time
-    print(f"Execution time: {time_dif}")
-
+    generate_output(args.input)
     
 if __name__ == '__main__':
-    # GLOBAL VARIABLES
-    # entries = {}
-    duplicate_entries = []
-    special_address_entries = []
-    invalid_email_entries = []
-    non_ncsa_domain_entries = []
-    unparseable_entries = []
-    
-    address_mapping = {
-        "default": "ncsa.illinois.edu",
-        "uiuc.edu": "illinois.edu",
-        "ncsa.edu": "ncsa.illinois.edu", 
-        "ncsa.uiuc.edu": "ncsa.illinois.edu"
-    }
-    
-    special_addresses = {
-        "devnull",
-        "postmaster",
-        "no-reply",
-        "security",
-        "jira",
-        "train",
-        "root",
-        "campuscluster",
-        "majordomo",
-        "help"
-    }
 
+    # GLOBAL VARIABLES
+    with open('config.yaml', 'r') as file:
+        data = yaml.safe_load(file)
+        
     # LOGGING 
-    
     logging.basicConfig(level=logging.WARNING,
                         format='%(levelname)s:%(message)s',
                         handlers=[
@@ -421,4 +794,4 @@ if __name__ == '__main__':
                         ])
     logger = logging.getLogger(__name__)    
     main()
-    # test()
+   
