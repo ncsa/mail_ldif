@@ -676,11 +676,49 @@ def find_ncsa_domain_targets(entries: list[Entry]) \
     invalid_entries = []
 
     for entry in entries:
-        if any("@ncsa.illinois.edu" in target for target in entry.targets):
+        if any("@ncsa" in target for target in entry.targets):
             invalid_entries.append(entry)
         else:
             valid_entries.append(entry)
     return (valid_entries, invalid_entries)
+
+def lowercase_addresses(entries: list[Entry]) -> list[Entry]:
+    """
+    Decided that email addresses are case-insensitive. 
+    Modify all addresses to be lowercase. 
+    
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects 
+
+    Returns:
+        entries (list[Entry]): A list of 'Entry' objects with source and 
+        targets lowercased 
+    """
+    for entry in entries:
+        entry.source = entry.source.lower()
+
+        for i, target in enumerate(entry.targets):
+            entry.targets[i] = target.lower()
+
+    return entries 
+
+def remove_duplicate_targets(entries: list[Entry]) -> list[Entry]:
+    """ 
+    Remove duplicate addresses from 'Entry' object's target
+
+    Args:
+        entries (list[Entry]): A list of 'Entry' objects
+
+    Returns:
+        entries (list[Entry]): A list of 'Entry' objects with unique 
+        target addresses 
+    """
+    for entry in entries:
+        unique_targets = set(entry.targets)
+        entry.targets = list(unique_targets)
+        entry.targets.sort()
+
+    return entries
 
 def write_to_csv(filename: str, entries: list[Entry]) -> None: 
     """
@@ -696,8 +734,12 @@ def write_to_csv(filename: str, entries: list[Entry]) -> None:
         writer = csv.writer(file)
         writer.writerow(["Source", "Targets"])
         for entry in entries:
-            comma_seperated_targets = ",".join(entry.targets)
-            writer.writerow([f"{entry.source}", f"{comma_seperated_targets}"])
+            comma_seperated_targets = str(",".join(entry.targets))
+            writer.writerow([entry.source, comma_seperated_targets])
+
+def print_entries(entries):
+    for entry in entries:
+        print(f"{entry.source}: {entry.targets}")
 
 def generate_output(input_file: list[str]) -> None:
     """
@@ -736,6 +778,11 @@ def generate_output(input_file: list[str]) -> None:
     # ADD ADDITIONAL ENTRIES
     entries = add_additional_entries(entries, additional_entries)
     
+
+    # LOWERCASE ADDRESSES 
+    entries = lowercase_addresses(entries)
+    entries = remove_duplicate_targets(entries)
+
     # FILTER ENTRIES
     entries, duplicates = remove_duplicates(entries)
     entries, non_ncsa = remove_non_ncsa_source_domains(entries)
@@ -743,6 +790,9 @@ def generate_output(input_file: list[str]) -> None:
     entries, misformatted_addresses = remove_misformatted_addresses(entries)
     entries, invalid_addresses = remove_invalid_addresses(entries)
     entries = resolve_symlinks(entries)  
+    # After resolving dependecies, the 'Entry' object's targets could have 
+    # duplicates 
+    entries = remove_duplicate_targets(entries)
     entries, ncsa_domain_targets = find_ncsa_domain_targets(entries)
 
     # PRINT VALID AND INVALID ENTRIES TO FILES
@@ -756,6 +806,9 @@ def generate_output(input_file: list[str]) -> None:
     print_list_entries(target_regexed_entries, f"{subdir}/target_regexed.txt")
     print_list_entries(ncsa_domain_targets, f"{subdir}/ncsa_domain_targets.txt")
     
+    # CUSTOM FUNCTIONS
+    #entries = jiratest2_to_ncsa_jira(entries)
+
     write_to_csv('output.csv', entries)
 
 def process_args():
